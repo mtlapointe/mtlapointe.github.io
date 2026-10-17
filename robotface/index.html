@@ -281,7 +281,7 @@ function toast(msg) {
 // so dragging a slider sends only the latest value.
 const queue = []; let pumping = false;
 function send(cmd, key) {
-  if (!connected) { toast("Connect to the face first"); return false; }
+  if (!connected) return false;   // offline: the controls still drive the preview
   if (key) {
     const i = queue.findIndex(q => q.key === key);
     if (i >= 0) { queue[i].cmd = cmd; pump(); return true; }
@@ -350,12 +350,14 @@ async function openGatt() {
   setPill("connected", device.name || "RobotFace");
   $("connect").textContent = "Disconnect";
   log("connected");
+  renderControls();
   send("status", "status");
 }
 
 async function onDisconnected() {
   connected = false; rxChar = null; queue.length = 0;
   $("connect").textContent = "Connect";
+  renderControls();
   if (!wantConnected) { setPill("off", "Not connected"); return; }
   // Out of range for a moment: try to get the link back without the chooser.
   for (let attempt = 1; attempt <= 5 && wantConnected; attempt++) {
@@ -424,7 +426,7 @@ function renderControls() {
   const label = !face.on ? "<b>Face off</b>"
     : face.anim ? `<b>${face.mode === "holding" ? "Looping" : "Playing"}</b> &middot; ${descOf(face.anim)}`
     : "<b>Idle</b> &middot; breathing";
-  $("nowText").innerHTML = label;
+  $("nowText").innerHTML = (connected ? "" : "Preview &middot; ") + label;
   $("nowMeta").textContent = `${face.bright} / 255 · ${face.speed}%${face.auto ? "" : " · manual"}`;
 }
 
@@ -439,11 +441,11 @@ function setTap(loop) {
 $("tapOnce").onclick = () => setTap(false);
 $("tapLoop").onclick = () => setTap(true);
 
-$("stop").onclick = () => { if (send("stop")) { face.anim = null; face.mode = "idle"; mirrorPlay(null); renderControls(); } };
-$("modeAuto").onclick = () => { if (send("auto")) { face.auto = true; renderControls(); } };
-$("modeManual").onclick = () => { if (send("manual")) { face.auto = false; renderControls(); } };
-$("faceOn").onclick = () => { if (send("on")) { face.on = true; renderControls(); } };
-$("faceOff").onclick = () => { if (send("off")) { face.on = false; renderControls(); } };
+$("stop").onclick = () => { send("stop"); face.anim = null; face.mode = "idle"; mirrorPlay(null); renderControls(); };
+$("modeAuto").onclick = () => { send("auto"); face.auto = true; renderControls(); };
+$("modeManual").onclick = () => { send("manual"); face.auto = false; renderControls(); };
+$("faceOn").onclick = () => { send("on"); face.on = true; renderControls(); };
+$("faceOff").onclick = () => { send("off"); face.on = false; renderControls(); };
 
 function slider(id, cmd, fmt) {
   const el = $(id);
@@ -550,14 +552,27 @@ function mirrorPlay(name, loop) {
 function stepTrack(t, now) {
   while (t && now >= t.due) {
     if (t.frame + 1 < t.anim.frames.length) t.frame++;
-    else if (t.loop) t.frame = 0;
+    else if (t.loop) { t.frame = 0; t.due += holdMs(t.anim, t.frame); return "wrapped"; }
     else return "ended";
     t.due += holdMs(t.anim, t.frame);
   }
 }
 
+// Offline in auto mode, the preview picks random animations the way the
+// face does: after each idle breath, never the same one twice in a row.
+let lastPreview = null;
+function previewPick() {
+  const names = exprs.map(a => a.name).filter(n => n !== lastPreview);
+  const name = names[Math.floor(Math.random() * names.length)];
+  lastPreview = name;
+  face.anim = name; face.mode = "playing";
+  mirrorPlay(name, false); renderControls();
+}
+
 function tick(now) {
-  if (stepTrack(track.m, now) === "ended") { face.anim = null; face.mode = "idle"; mirrorPlay(null); renderControls(); }
+  const mStep = stepTrack(track.m, now);
+  if (mStep === "ended") { face.anim = null; face.mode = "idle"; mirrorPlay(null); renderControls(); }
+  else if (mStep === "wrapped" && !connected && face.auto && !face.anim && face.on) previewPick();
   if (stepTrack(track.e, now) === "ended") track.e.due = Infinity;   // hold the last eye frame
 
   const m = track.m, e = track.e;
@@ -604,7 +619,7 @@ for (const a of exprs) {
   b.append(c, name);
   b.setAttribute("aria-label", `${a.description || a.name}, ${a.category || ""}`);
   b.onclick = () => {
-    if (!send(`${tapLoops ? "hold" : "play"} ${a.name}`)) return;
+    send(`${tapLoops ? "hold" : "play"} ${a.name}`);
     face.anim = a.name; face.mode = tapLoops ? "holding" : "playing";
     mirrorPlay(a.name, tapLoops); renderControls();
   };
